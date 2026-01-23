@@ -40,13 +40,9 @@ jobs:
         run: |
           python scripts/update_commodity_data.py
 
-      - name: Generate commodity volatility smile
+      - name: Run full analysis (smile + skew + alerts)
         run: |
-          python commodity_volatility_smile.py rb fg ag au cu
-
-      - name: Generate index volatility smile
-        run: |
-          python index_volatility_smile.py
+          python run_full_analysis.py
 
       - name: Send email report
         env:

@@ -14,9 +14,16 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 
 
 def create_email_body():
-    """Create HTML email body"""
+    """Create HTML email body - try to load generated report first"""
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # Try to load the generated HTML report with skew analysis
+    report_path = os.path.join(os.path.dirname(__file__), "..", "output", "report.html")
+    if os.path.exists(report_path):
+        with open(report_path, 'r') as f:
+            return f.read()
+
+    # Fallback to basic report
     html = f"""
     <html>
     <head>
