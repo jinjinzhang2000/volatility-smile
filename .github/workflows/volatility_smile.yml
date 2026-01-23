@@ -4,8 +4,8 @@ on:
   # Run on weekdays at 16:30 Beijing time (08:30 UTC) - after China market close
   schedule:
     - cron: '30 8 * * 1-5'
-    # Test schedule: 1:00 AM Beijing time (17:00 UTC previous day)
-    - cron: '0 17 * * *'
+    # Test schedule: 0:45 AM Beijing time (16:45 UTC previous day)
+    - cron: '45 16 * * *'
 
   # Allow manual trigger
   workflow_dispatch:
