@@ -1,0 +1,60 @@
+name: Volatility Smile Report
+
+on:
+  # Run on weekdays at 16:30 Beijing time (08:30 UTC) - after China market close
+  schedule:
+    - cron: '30 8 * * 1-5'
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Chinese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-wqy-microhei fonts-wqy-zenhei
+
+      - name: Download latest options data
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          python scripts/update_commodity_data.py
+
+      - name: Generate commodity volatility smile
+        run: |
+          python commodity_volatility_smile.py rb fg ag au cu
+
+      - name: Generate index volatility smile
+        run: |
+          python index_volatility_smile.py
+
+      - name: Send email report
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          python scripts/send_email_report.py
+
+      - name: Upload charts as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: volatility-smile-charts
+          path: output/charts/*.png
+          retention-days: 30
