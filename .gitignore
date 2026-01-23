@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.env
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Output data (optional - remove if you want to track these)
+# output/
+
+# Pickle files (large data files)
+*.pkl
+
+# Temporary files
+*.tmp
+*.bak
