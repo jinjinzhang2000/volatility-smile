@@ -55,6 +55,55 @@ def implied_volatility(option_price, S, K, T, r, option_type='call'):
         return np.nan
 
 
+def get_futures_price(prefix, maturity, trade_date):
+    """
+    Get futures price for the underlying contract from Tushare
+
+    Args:
+        prefix: Commodity code (e.g., 'rb', 'ag')
+        maturity: Contract month (e.g., '2605')
+        trade_date: Trade date string (YYYYMMDD)
+
+    Returns:
+        Futures close price or None
+    """
+    try:
+        import tushare as ts
+        token = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
+        ts.set_token(token)
+        pro = ts.pro_api()
+
+        # Map to Tushare exchange codes
+        exchange_map = {
+            'rb': 'SHFE', 'ag': 'SHFE', 'au': 'SHFE', 'cu': 'SHFE',
+            'fg': 'CZCE'
+        }
+        exchange = exchange_map.get(prefix.lower(), 'SHFE')
+
+        # Format contract code: RB2605.SHF
+        if exchange == 'CZCE':
+            # CZCE uses 3-digit month: FG605.ZCE
+            ts_code = f"{prefix.upper()}{maturity[1:]}.ZCE"
+        else:
+            ts_code = f"{prefix.upper()}{maturity}.SHF"
+
+        df = pro.fut_daily(
+            ts_code=ts_code,
+            start_date=trade_date,
+            end_date=trade_date,
+            fields='close,settle'
+        )
+
+        if df is not None and not df.empty:
+            # Prefer settle price, fallback to close
+            price = df['settle'].iloc[0] if pd.notna(df['settle'].iloc[0]) else df['close'].iloc[0]
+            return price
+    except Exception as e:
+        print(f"    Warning: Could not fetch futures price for {prefix}{maturity}: {e}")
+
+    return None
+
+
 def load_shfe_data(data_dir, prefix):
     """
     Load SHFE options data with Chinese column names
@@ -186,48 +235,80 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
 
         T = days / 365.0
 
-        # Estimate underlying using put-call parity
-        # First try: use call-put pairs at same strike
-        call_cols = ['exercise_price', 'close']
-        put_cols = ['exercise_price', 'close']
-        if 'volume' in df_mat.columns:
-            call_cols.append('volume')
-            put_cols.append('volume')
-        calls = df_mat[df_mat['call_put'] == 'C'][call_cols].copy()
-        puts = df_mat[df_mat['call_put'] == 'P'][put_cols].copy()
+        # Get futures price directly from market data (preferred)
+        # This is more accurate than implied forward from options
+        code = name.lower() if len(name) <= 2 else None
+        # Try to extract code from the data
+        if code is None:
+            sample_code = df_mat['合约代码'].iloc[0] if '合约代码' in df_mat.columns else ''
+            code_match = re.match(r'([a-zA-Z]+)', str(sample_code))
+            if code_match:
+                code = code_match.group(1).lower()
 
-        merged = calls.merge(puts, on='exercise_price', suffixes=('_c', '_p'))
-        merged = merged[(merged['close_c'] > 0) & (merged['close_p'] > 0)]
+        F = None
+        if code:
+            F = get_futures_price(code, maturity, trade_date_str)
+            if F:
+                print(f"  {name} {maturity}: F={F:.0f} (futures), T={T:.3f} ({days}d)")
 
-        if not merged.empty:
-            merged['S_est'] = merged['exercise_price'] + merged['close_c'] - merged['close_p']
-            S = merged['S_est'].median()
-        else:
-            # Fallback: use S from nearby maturity or median strike
-            # First check if we have a previous S estimate we can use
-            if results and len(results) > 0:
-                # Use S from the most recent maturity as reference
-                S = results[-1]['underlying']
-                print(f"    (using S from previous maturity)")
+        # Fallback: Calculate implied forward from put-call parity
+        if F is None:
+            call_cols = ['exercise_price', 'close']
+            put_cols = ['exercise_price', 'close']
+            if 'volume' in df_mat.columns:
+                call_cols.append('volume')
+                put_cols.append('volume')
+            calls = df_mat[df_mat['call_put'] == 'C'][call_cols].copy()
+            puts = df_mat[df_mat['call_put'] == 'P'][put_cols].copy()
+
+            merged = calls.merge(puts, on='exercise_price', suffixes=('_c', '_p'))
+            merged = merged[(merged['close_c'] > 0) & (merged['close_p'] > 0)]
+
+            if not merged.empty:
+                # Proper put-call parity: F = K + (C - P) * exp(r*T)
+                merged['F_implied'] = merged['exercise_price'] + (merged['close_c'] - merged['close_p']) * np.exp(risk_free_rate * T)
+                F = merged['F_implied'].median()
+                print(f"  {name} {maturity}: F={F:.0f} (implied), T={T:.3f} ({days}d)")
             else:
-                # Use median strike as proxy for ATM
-                S = df_mat['exercise_price'].median()
-                print(f"    (using median strike as S estimate)")
+                # Last fallback: use F from nearby maturity or median strike
+                if results and len(results) > 0:
+                    F = results[-1]['forward']
+                    print(f"  {name} {maturity}: F={F:.0f} (prev mat), T={T:.3f} ({days}d)")
+                else:
+                    F = df_mat['exercise_price'].median()
+                    print(f"  {name} {maturity}: F={F:.0f} (median K), T={T:.3f} ({days}d)")
 
-        print(f"  {name} {maturity}: S={S:.0f}, T={T:.3f} ({days}d)")
-
-        # Group by strike - only use the more liquid contract (call or put) at each strike
+        # Group by strike - use OTM options (convention: puts for K<F, calls for K>F)
+        # This avoids put-call parity discrepancies and uses more liquid OTM contracts
         strikes = df_mat['exercise_price'].dropna().unique()
         for K in strikes:
             strike_opts = df_mat[df_mat['exercise_price'] == K]
 
-            # Find the most liquid option at this strike
+            # Determine which option type to use based on moneyness
+            # OTM puts for K < F, OTM calls for K > F, either for ATM
+            moneyness = K / F
+            if moneyness < 0.98:
+                # Use put (OTM)
+                preferred_type = 'P'
+            elif moneyness > 1.02:
+                # Use call (OTM)
+                preferred_type = 'C'
+            else:
+                # Near ATM - use the more liquid one
+                preferred_type = None
+
+            # Find the best option at this strike
             best_opt = None
             best_vol = -1
             for _, row in strike_opts.iterrows():
                 price = row['close'] if pd.notna(row['close']) and row['close'] > 0 else None
                 if price is None or price <= 0:
                     continue
+
+                # If we have a preferred type, only consider that type
+                if preferred_type and row['call_put'] != preferred_type:
+                    continue
+
                 vol = row.get('volume', 0) if 'volume' in row else 0
                 if vol > best_vol:
                     best_vol = vol
@@ -238,16 +319,16 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
 
             price = best_opt['close']
             opt_type = 'call' if best_opt['call_put'] == 'C' else 'put'
-            iv = implied_volatility(price, S, K, T, risk_free_rate, opt_type)
+            iv = implied_volatility(price, F, K, T, risk_free_rate, opt_type)
 
             if pd.notna(iv) and 0.05 < iv < 3.0:
-                moneyness = K / S
+                moneyness = K / F
                 if 0.8 < moneyness < 1.2:
                     results.append({
                         'maturity': maturity,
                         'days': days,
                         'strike': K,
-                        'underlying': S,
+                        'forward': F,
                         'moneyness': moneyness,
                         'option_type': opt_type,
                         'iv': iv * 100,
