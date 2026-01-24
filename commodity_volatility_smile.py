@@ -135,7 +135,7 @@ def load_czce_data(data_dir, prefix):
     return df
 
 
-def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, min_volume=10):
+def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, min_volume=50):
     """
     Calculate volatility smile for a given date
 
@@ -144,7 +144,7 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
         trade_date_str: Date string in YYYYMMDD format
         name: Commodity name for display
         risk_free_rate: Risk-free rate (default 2.5%)
-        min_volume: Minimum volume filter (default 10, excludes illiquid options)
+        min_volume: Minimum volume filter (default 50, excludes illiquid options)
 
     Returns:
         DataFrame with volatility smile data
@@ -152,6 +152,7 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
     df = df[df['trade_date'] == int(trade_date_str)].copy()
 
     # Filter by minimum volume to exclude illiquid options with stale prices
+    # Use higher threshold for better data quality
     if 'volume' in df.columns:
         df = df[df['volume'] >= min_volume]
 
@@ -258,7 +259,43 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
 
     result_df = pd.DataFrame(results)
 
-    # Filter outlier maturities
+    # Filter IV outliers within each maturity using IQR method
+    cleaned_results = []
+    for mat in result_df['maturity'].unique():
+        mat_df = result_df[result_df['maturity'] == mat].copy()
+        days = mat_df['days'].iloc[0] if len(mat_df) > 0 else 0
+
+        # Require more data points for short-dated options (more prone to noise)
+        min_points = 7 if days < 30 else 5
+
+        if len(mat_df) < min_points:
+            print(f"  {mat}: Skipping (only {len(mat_df)} points, need {min_points})")
+            continue
+
+        if len(mat_df) >= 5:
+            q1 = mat_df['iv'].quantile(0.25)
+            q3 = mat_df['iv'].quantile(0.75)
+            iqr = q3 - q1
+            lower_bound = q1 - 2.0 * iqr  # More lenient for vol smile
+            upper_bound = q3 + 2.0 * iqr
+
+            before_count = len(mat_df)
+            mat_df = mat_df[(mat_df['iv'] >= lower_bound) & (mat_df['iv'] <= upper_bound)]
+            after_count = len(mat_df)
+
+            if before_count > after_count:
+                print(f"  {mat}: Removed {before_count - after_count} IV outliers")
+
+            # After filtering, check if we still have enough points
+            if len(mat_df) < min_points:
+                print(f"  {mat}: Skipping after outlier removal (only {len(mat_df)} points)")
+                continue
+
+        cleaned_results.append(mat_df)
+
+    result_df = pd.concat(cleaned_results, ignore_index=True)
+
+    # Filter outlier maturities (entire maturity has bad data)
     median_iv = result_df['iv'].median()
     valid = []
     for mat in result_df['maturity'].unique():
