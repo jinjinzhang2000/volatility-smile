@@ -13,10 +13,10 @@ import time
 # Tushare token - use environment variable for security
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
 
-# Output directories
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COMMODITY_DIR = os.path.join(BASE_DIR, "data", "commodity")
-INDEX_OPTIONS_DIR = os.path.join(BASE_DIR, "data", "index_options")
+# Data directories - support DATA_DIR env variable for shared data
+DATA_DIR = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
+COMMODITY_DIR = os.path.join(DATA_DIR, "commodity")
+INDEX_OPTIONS_DIR = os.path.join(DATA_DIR, "index_options")
 
 # Today's date
 TODAY = datetime.now().strftime("%Y%m%d")

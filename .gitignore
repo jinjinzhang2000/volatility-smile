@@ -22,8 +22,14 @@ venv/
 logs/
 *.log
 
-# Output data (optional - remove if you want to track these)
-# output/
+# Local config
+config/
+
+# Output data (generated files)
+output/
+
+# Data files (stored in shared-data, not in repo)
+data/
 
 # Pickle files (large data files)
 *.pkl
@@ -31,3 +37,6 @@ logs/
 # Temporary files
 *.tmp
 *.bak
+
+# Claude Code
+.claude/

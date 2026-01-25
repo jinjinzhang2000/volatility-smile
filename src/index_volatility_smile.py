@@ -539,14 +539,15 @@ def process_index_option(code, data_dir=None, trade_date=None):
 
     config = INDEX_OPTIONS[code]
 
-    # Default data directory
+    # Default data directory - support DATA_DIR env variable for shared data
     if data_dir is None:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        base_dir = os.path.dirname(script_dir)
-        data_dir = os.path.join(base_dir, 'data', 'index_options')
+        data_root = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
+        data_dir = os.path.join(data_root, 'index_options')
         if not os.path.exists(data_dir):
-            # Fallback to old path
-            data_dir = os.path.join(base_dir, 'index_options_data')
+            # Fallback to local path
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            base_dir = os.path.dirname(script_dir)
+            data_dir = os.path.join(base_dir, 'data', 'index_options')
 
     if not os.path.exists(data_dir):
         print(f"Data directory not found: {data_dir}")

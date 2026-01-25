@@ -659,13 +659,14 @@ def process_commodity(code, trade_date=None):
     config = COMMODITIES[code]
 
     # Check multiple possible data directories
+    # Support DATA_DIR env variable for shared data
+    data_root = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir = os.path.dirname(script_dir)
     possible_dirs = [
+        os.path.join(data_root, 'commodity', code),
         os.path.join(base_dir, 'data', 'commodity', code),
         os.path.join(base_dir, 'Commodity', code),
-        code,
-        f'Commodity/{code}'
     ]
     data_dir = None
     for d in possible_dirs:
