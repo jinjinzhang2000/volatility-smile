@@ -42,7 +42,7 @@ jobs:
 
       - name: Run full analysis (smile + skew + alerts)
         run: |
-          python run_full_analysis.py
+          python src/run_full_analysis.py
 
       - name: Send email report
         env:
