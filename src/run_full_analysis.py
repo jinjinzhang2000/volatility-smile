@@ -108,13 +108,29 @@ def run_analysis():
         traceback.print_exc()
 
     # 4. Generate group analysis
-    print("\n[4/4] Generating group analysis...")
+    print("\n[4/6] Generating group analysis...")
     try:
         from skew_analyzer import analyze_group_skew
         for group_name in ['real_estate', 'precious_metals', 'industrial']:
             analyze_group_skew(group_name)
     except Exception as e:
         print(f"Error in group analysis: {e}")
+
+    # 5. Generate ATM IV ranking
+    print("\n[5/6] Generating ATM IV ranking...")
+    try:
+        from atm_iv_ranking import main as atm_iv_main
+        atm_iv_main()
+    except Exception as e:
+        print(f"Error in ATM IV ranking: {e}")
+
+    # 6. Generate 25d skew ranking
+    print("\n[6/6] Generating 25-delta skew ranking...")
+    try:
+        from skew_ranking import main as skew_ranking_main
+        skew_ranking_main()
+    except Exception as e:
+        print(f"Error in skew ranking: {e}")
 
     print("\n" + "="*60)
     print("Analysis complete!")
