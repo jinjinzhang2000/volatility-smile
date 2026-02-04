@@ -31,7 +31,7 @@ output/*
 !output/data/*
 
 # Data files (stored in shared-data, not in repo)
-data/
+/data/
 
 # Pickle files (large data files)
 *.pkl
