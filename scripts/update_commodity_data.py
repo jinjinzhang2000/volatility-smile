@@ -14,7 +14,11 @@ import time
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
 
 # Data directories - support DATA_DIR env variable for shared data
-DATA_DIR = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
+# Default to a local 'data' directory in the project root
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(SCRIPT_DIR)
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
+
 COMMODITY_DIR = os.path.join(DATA_DIR, "commodity")
 INDEX_OPTIONS_DIR = os.path.join(DATA_DIR, "index_options")
 
@@ -277,6 +281,19 @@ def download_etf_options(pro, etf_code, name, exchange):
     print(f"\n[{name}] Downloading ETF options...")
 
     try:
+        # Get mapping of options to underlying ETF
+        basic = pro.opt_basic(exchange=exchange)
+        if basic is None or basic.empty:
+            print(f"  Could not fetch basic options info for {exchange}")
+            return None
+
+        # Filter those that belong to our target ETF using the name (e.g. '50ETF')
+        # This is more robust for SSE where underlying_index field might be missing in some API versions
+        target_options = basic[basic['name'].str.contains(name, na=False)]['ts_code'].tolist()
+        if not target_options:
+            print(f"  No option contracts found for {name} ({etf_code})")
+            return None
+
         df = pro.opt_daily(
             exchange=exchange,
             start_date=START_DATE,
@@ -285,14 +302,14 @@ def download_etf_options(pro, etf_code, name, exchange):
         )
 
         if df is None or df.empty:
-            print(f"  No options found for {etf_code}")
+            print(f"  No daily data returned from API for {exchange}")
             return None
 
-        # Filter by ETF code
-        df = df[df['ts_code'].str.contains(etf_code)]
+        # Filter by our target option contracts
+        df = df[df['ts_code'].isin(target_options)]
 
         if df.empty:
-            print(f"  No options found for {etf_code}")
+            print(f"  No {name} ({etf_code}) options data found for the date range")
             return None
 
         print(f"  Downloaded {len(df)} records")

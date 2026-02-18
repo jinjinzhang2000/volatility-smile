@@ -14,7 +14,8 @@ import os
 import re
 from datetime import datetime
 
-matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
+# Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
+matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
@@ -82,6 +83,7 @@ def get_futures_price(prefix, maturity, trade_date):
     """
     try:
         import tushare as ts
+        # Use a consistent token fallback
         token = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
         ts.set_token(token)
         pro = ts.pro_api()
@@ -660,13 +662,14 @@ def process_commodity(code, trade_date=None):
 
     # Check multiple possible data directories
     # Support DATA_DIR env variable for shared data
-    data_root = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.dirname(script_dir)
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = os.path.dirname(SCRIPT_DIR)
+    data_root = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
+
     possible_dirs = [
         os.path.join(data_root, 'commodity', code),
-        os.path.join(base_dir, 'data', 'commodity', code),
-        os.path.join(base_dir, 'Commodity', code),
+        os.path.join(BASE_DIR, 'data', 'commodity', code),
+        os.path.join(BASE_DIR, 'Commodity', code),
     ]
     data_dir = None
     for d in possible_dirs:
