@@ -6,6 +6,7 @@ Designed for GitHub Actions
 
 import os
 import sys
+import base64
 from datetime import datetime
 
 # Configuration
@@ -60,16 +61,16 @@ def create_email_body():
 def send_email():
     """Send email with charts attached via Resend API"""
     if not RESEND_API_KEY:
-        print("ERROR: RESEND_API_KEY not set!")
-        print("Please add RESEND_API_KEY to GitHub Secrets")
-        sys.exit(1)
+        print("WARNING: RESEND_API_KEY not set. Skipping email report.")
+        print("Please add RESEND_API_KEY to GitHub Secrets if you want to receive email reports.")
+        return False
 
     try:
         import resend
         resend.api_key = RESEND_API_KEY
     except ImportError:
         print("ERROR: resend package not installed")
-        sys.exit(1)
+        return False
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -83,9 +84,11 @@ def send_email():
                 img_path = os.path.join(charts_dir, img_file)
                 with open(img_path, 'rb') as f:
                     img_data = f.read()
+                # Use base64 encoding for better reliability and smaller payload size
+                encoded_data = base64.b64encode(img_data).decode('utf-8')
                 attachments.append({
                     "filename": img_file,
-                    "content": list(img_data),
+                    "content": encoded_data,
                 })
                 print(f"  Attached: {img_file}")
 
@@ -112,7 +115,7 @@ def send_email():
         return True
     except Exception as e:
         print(f"ERROR sending email: {e}")
-        sys.exit(1)
+        return False
 
 
 if __name__ == '__main__':

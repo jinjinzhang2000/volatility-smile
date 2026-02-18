@@ -16,8 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Configure matplotlib for Chinese fonts
-plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'STHeiti', 'Heiti TC']
+# Configure matplotlib for Chinese fonts - include WenQuanYi for Linux support
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'Arial Unicode MS', 'SimHei', 'STHeiti', 'Heiti TC']
 plt.rcParams['axes.unicode_minus'] = False
 
 # Commodity configurations with Chinese names

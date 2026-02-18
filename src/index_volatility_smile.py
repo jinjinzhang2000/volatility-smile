@@ -17,7 +17,8 @@ import os
 import re
 from datetime import datetime
 
-matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
+# Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
+matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
@@ -541,13 +542,13 @@ def process_index_option(code, data_dir=None, trade_date=None):
 
     # Default data directory - support DATA_DIR env variable for shared data
     if data_dir is None:
-        data_root = os.environ.get("DATA_DIR", os.path.expanduser("~/Desktop/shared-data"))
+        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+        BASE_DIR = os.path.dirname(SCRIPT_DIR)
+        data_root = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
         data_dir = os.path.join(data_root, 'index_options')
         if not os.path.exists(data_dir):
             # Fallback to local path
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            base_dir = os.path.dirname(script_dir)
-            data_dir = os.path.join(base_dir, 'data', 'index_options')
+            data_dir = os.path.join(BASE_DIR, 'data', 'index_options')
 
     if not os.path.exists(data_dir):
         print(f"Data directory not found: {data_dir}")

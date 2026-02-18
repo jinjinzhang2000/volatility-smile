@@ -19,7 +19,8 @@ import os
 import json
 from datetime import datetime, timedelta
 
-matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
+# Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
+matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # Configuration
