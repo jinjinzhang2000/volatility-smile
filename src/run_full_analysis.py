@@ -263,11 +263,7 @@ def run_analysis():
                     alerts = generate_alerts(code, skew_metrics, trade_date)
                     all_alerts.extend(alerts)
 
-                    # Plot history if we have enough data
-                    try:
-                        plot_skew_history(code, f"output/charts/{code}_skew_history.png")
-                    except:
-                        pass
+
 
         # Process indices
         for code, smile_df in results['index_smiles'].items():
@@ -325,7 +321,14 @@ def run_analysis():
     # 7. Generate combined charts (the two main output charts)
     print("\n[7/7] Generating combined charts...")
     trade_date = datetime.now().strftime('%Y%m%d')
-    os.makedirs('output/charts', exist_ok=True)
+
+    # Clear old charts so only the 2 combined charts remain
+    charts_dir = 'output/charts'
+    if os.path.exists(charts_dir):
+        import glob as _glob
+        for old_png in _glob.glob(os.path.join(charts_dir, '*.png')):
+            os.remove(old_png)
+    os.makedirs(charts_dir, exist_ok=True)
 
     # Collect all smile DataFrames
     all_smiles = {}

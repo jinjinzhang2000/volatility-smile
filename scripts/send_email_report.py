@@ -78,13 +78,18 @@ def send_email():
     attachments = []
     charts_dir = "output/charts"
 
+    # Only attach the 2 combined charts
+    CHART_FILES = [
+        'all_volatility_smiles.png',
+        'all_skew_summary.png',
+    ]
+
     if os.path.exists(charts_dir):
-        for img_file in os.listdir(charts_dir):
-            if img_file.endswith('.png'):
-                img_path = os.path.join(charts_dir, img_file)
+        for img_file in CHART_FILES:
+            img_path = os.path.join(charts_dir, img_file)
+            if os.path.exists(img_path):
                 with open(img_path, 'rb') as f:
                     img_data = f.read()
-                # Use base64 encoding for better reliability and smaller payload size
                 encoded_data = base64.b64encode(img_data).decode('utf-8')
                 attachments.append({
                     "filename": img_file,
