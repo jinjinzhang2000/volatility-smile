@@ -101,28 +101,40 @@ def calculate_skew_metrics(smile_df, underlying_price=None):
         atm_row = df_mat.loc[df_mat['dist_from_atm'].idxmin()]
         atm_iv = atm_row['iv']
 
-        # Interpolate to get 25-delta put and call IV
-        # 25-delta put is typically around 0.92-0.95 moneyness
-        # 25-delta call is typically around 1.05-1.08 moneyness
+        # Interpolate to get 25-delta put and call IV using polynomial fit
+        # Dynamic 25-delta moneyness: K/F = exp(±σ√T · Φ⁻¹(0.75))
+        T = days / 365.0 if days > 0 else 0.1
+        atm_sigma = atm_iv / 100.0  # Convert from percentage
 
-        # For puts (OTM puts have moneyness < 1)
-        otm_puts = df_mat[df_mat['moneyness'] < 0.98].sort_values('moneyness')
-        if len(otm_puts) >= 2:
-            # Target ~0.93 moneyness for 25-delta put
-            target_m = 0.93
-            closest_put = otm_puts.iloc[(otm_puts['moneyness'] - target_m).abs().argsort()[:1]]
-            put_25d_iv = closest_put['iv'].values[0]
+        # Fit quadratic to the smile for interpolation
+        moneyness_arr = df_mat['moneyness'].values
+        iv_arr = df_mat['iv'].values
+        try:
+            coeffs = np.polyfit(moneyness_arr, iv_arr, min(2, len(moneyness_arr) - 1))
+            poly = np.poly1d(coeffs)
+        except (np.linalg.LinAlgError, ValueError):
+            poly = None
+
+        # Compute dynamic 25-delta moneyness points
+        shift = atm_sigma * np.sqrt(T) * norm.ppf(0.75)
+        put_25d_m = np.exp(-shift)   # ~0.92-0.95 depending on IV and T
+        call_25d_m = np.exp(shift)    # ~1.05-1.08 depending on IV and T
+
+        # Clamp to data range
+        m_min, m_max = moneyness_arr.min(), moneyness_arr.max()
+        put_25d_m = max(put_25d_m, m_min + 0.005)
+        call_25d_m = min(call_25d_m, m_max - 0.005)
+
+        if poly is not None:
+            put_25d_iv = float(poly(put_25d_m))
+            call_25d_iv = float(poly(call_25d_m))
+            # Sanity check — IV should be positive
+            if put_25d_iv <= 0:
+                put_25d_iv = atm_iv
+            if call_25d_iv <= 0:
+                call_25d_iv = atm_iv
         else:
             put_25d_iv = atm_iv
-
-        # For calls (OTM calls have moneyness > 1)
-        otm_calls = df_mat[df_mat['moneyness'] > 1.02].sort_values('moneyness')
-        if len(otm_calls) >= 2:
-            # Target ~1.07 moneyness for 25-delta call
-            target_m = 1.07
-            closest_call = otm_calls.iloc[(otm_calls['moneyness'] - target_m).abs().argsort()[:1]]
-            call_25d_iv = closest_call['iv'].values[0]
-        else:
             call_25d_iv = atm_iv
 
         # Calculate metrics

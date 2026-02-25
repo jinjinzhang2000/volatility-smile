@@ -115,8 +115,9 @@ def get_futures_price(prefix, maturity, trade_date):
         )
 
         if df is not None and not df.empty:
-            # Prefer settle price, fallback to close
-            price = df['settle'].iloc[0] if pd.notna(df['settle'].iloc[0]) else df['close'].iloc[0]
+            # Prefer close (last traded) price, fallback to settle
+            # Chinese exchange settle prices are theoretical and may not reflect market reality
+            price = df['close'].iloc[0] if pd.notna(df['close'].iloc[0]) else df['settle'].iloc[0]
             return price
     except Exception as e:
         print(f"    Warning: Could not fetch futures price for {prefix}{maturity}: {e}")
