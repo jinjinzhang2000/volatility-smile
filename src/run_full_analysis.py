@@ -9,11 +9,201 @@ This is the main entry point for GitHub Actions
 import os
 import sys
 from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
+matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 # Ensure we're in the right directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
 os.chdir(BASE_DIR)
+
+# Display names
+NAMES = {
+    'rb': '螺纹钢 RB', 'fg': '玻璃 FG', 'ag': '白银 AG', 'au': '黄金 AU',
+    'cu': '铜 CU', 'ru': '橡胶 RU', 'al': '铝 AL', 'zn': '锌 ZN',
+    'i': '铁矿 I', 'jm': '焦煤 JM', 'j': '焦炭 J',
+    'sr': '白糖 SR', 'cf': '棉花 CF', 'ta': 'PTA', 'ma': '甲醇 MA',
+    'pp': 'PP', 'eg': 'EG', 'sa': '纯碱 SA',
+    'io': '沪深300 IO', 'mo': '中证1000 MO', 'ho': '上证50 HO',
+    '50etf': '50ETF', '300etf': '300ETF', '500etf': '500ETF',
+}
+
+def plot_all_smiles(all_smiles, trade_date_str, save_path):
+    """Plot all underlyings' vol surface (all maturities) on one figure."""
+    smile_data = {}
+    for code, df in all_smiles.items():
+        if df is None or df.empty:
+            continue
+        # Keep all maturities with enough data
+        valid_mats = []
+        for mat in sorted(df['maturity'].unique()):
+            sub = df[df['maturity'] == mat]
+            if len(sub) >= 3:
+                valid_mats.append(mat)
+        if valid_mats:
+            smile_data[code] = df[df['maturity'].isin(valid_mats)]
+
+    if not smile_data:
+        print("  No smile data to plot")
+        return
+
+    n = len(smile_data)
+    cols = min(4, n)
+    rows = (n + cols - 1) // cols
+
+    fig, axes = plt.subplots(rows, cols, figsize=(4.5 * cols, 3.5 * rows))
+    if n == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    # Color palette for maturities
+    mat_colors = ['#264653', '#2a9d8f', '#e9c46a', '#f4a261', '#e63946', '#6a4c93']
+
+    for idx, (code, df) in enumerate(sorted(smile_data.items())):
+        ax = axes[idx]
+        maturities = sorted(df['maturity'].unique())
+
+        for mi, mat in enumerate(maturities):
+            sub = df[df['maturity'] == mat].sort_values('moneyness')
+            x = sub['moneyness'].values
+            y = sub['iv'].values
+            days = int(sub['days'].iloc[0])
+            color = mat_colors[mi % len(mat_colors)]
+
+            ax.scatter(x, y, s=12, alpha=0.4, color=color, zorder=5)
+
+            # Quadratic fit per maturity
+            try:
+                coeffs = np.polyfit(x, y, min(2, len(x) - 1))
+                poly = np.poly1d(coeffs)
+                x_sm = np.linspace(max(x.min(), 0.85), min(x.max(), 1.15), 60)
+                ax.plot(x_sm, poly(x_sm), color=color, linewidth=1.8,
+                        label=f'{mat} ({days}d)', zorder=10)
+            except:
+                ax.plot(x, y, color=color, linewidth=1.2, label=f'{mat} ({days}d)')
+
+        ax.axvline(1.0, color='gray', linestyle='--', alpha=0.3, linewidth=1)
+
+        name = NAMES.get(code, code.upper())
+        ax.set_title(name, fontsize=10, fontweight='bold')
+        ax.set_xlim(0.85, 1.15)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.15)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(fontsize=6, loc='upper center', ncol=min(3, len(maturities)),
+                  handlelength=1.5, framealpha=0.6)
+
+    for idx in range(n, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.supxlabel('Moneyness (K/F)', fontsize=12, fontweight='bold')
+    fig.supylabel('Implied Volatility (%)', fontsize=12, fontweight='bold')
+
+    date_fmt = f"{trade_date_str[:4]}-{trade_date_str[4:6]}-{trade_date_str[6:8]}"
+    fig.suptitle(f'波动率曲面 Volatility Surface — {date_fmt}', fontsize=14, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    print(f"  Saved combined surface chart: {save_path}")
+    plt.close()
+
+
+def plot_skew_summary(all_skew_metrics, trade_date_str, save_path):
+    """Plot front-end vs back-end 25-delta skew for all underlyings."""
+    rows_list = []
+    for code, metrics in all_skew_metrics.items():
+        if not metrics:
+            continue
+        sorted_mats = sorted(metrics.keys())
+        if len(sorted_mats) < 1:
+            continue
+
+        front_mat = sorted_mats[0]
+        front_m = metrics[front_mat]
+
+        # Back-end: use the longest maturity if ≥2 maturities, else same as front
+        back_mat = sorted_mats[-1] if len(sorted_mats) >= 2 else sorted_mats[0]
+        back_m = metrics[back_mat]
+
+        rows_list.append({
+            'code': code,
+            'name': NAMES.get(code, code.upper()),
+            'front_skew': front_m['skew_25d'],
+            'front_days': front_m['days'],
+            'front_mat': front_mat,
+            'back_skew': back_m['skew_25d'],
+            'back_days': back_m['days'],
+            'back_mat': back_mat,
+            'has_back': len(sorted_mats) >= 2,
+        })
+
+    if not rows_list:
+        print("  No skew data to plot")
+        return
+
+    df = pd.DataFrame(rows_list).sort_values('front_skew')
+
+    n = len(df)
+    bar_h = 0.35
+    fig, ax = plt.subplots(figsize=(11, max(4, n * 0.6 + 1)))
+
+    y_pos = np.arange(n)
+
+    # Front-end bars
+    front_colors = ['#e63946' if s < 0 else '#2a9d8f' for s in df['front_skew']]
+    ax.barh(y_pos + bar_h/2, df['front_skew'].values, height=bar_h,
+            color=front_colors, alpha=0.85, label='Front-end')
+
+    # Back-end bars
+    back_colors = ['#c1121f' if s < 0 else '#1b998b' for s in df['back_skew']]
+    ax.barh(y_pos - bar_h/2, df['back_skew'].values, height=bar_h,
+            color=back_colors, alpha=0.55, label='Back-end', edgecolor='gray', linewidth=0.5)
+
+    # Labels
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([r['name'] for _, r in df.iterrows()], fontsize=10)
+
+    # Value annotations
+    for i, (_, r) in enumerate(df.iterrows()):
+        # Front label
+        s_f = r['front_skew']
+        offset = -0.08 if s_f < 0 else 0.08
+        ha = 'right' if s_f < 0 else 'left'
+        ax.text(s_f + offset, i + bar_h/2, f"{s_f:+.1f}% ({int(r['front_days'])}d)",
+                va='center', ha=ha, fontsize=7.5, fontweight='bold', color='#333')
+
+        # Back label (only if different from front)
+        if r['has_back']:
+            s_b = r['back_skew']
+            offset = -0.08 if s_b < 0 else 0.08
+            ha = 'right' if s_b < 0 else 'left'
+            ax.text(s_b + offset, i - bar_h/2, f"{s_b:+.1f}% ({int(r['back_days'])}d)",
+                    va='center', ha=ha, fontsize=7.5, color='#666')
+
+    ax.axvline(0, color='black', linewidth=0.8)
+    ax.set_xlabel('25-Delta Skew (Put IV − Call IV) %', fontsize=12, fontweight='bold')
+
+    date_fmt = f"{trade_date_str[:4]}-{trade_date_str[4:6]}-{trade_date_str[6:8]}"
+    ax.set_title(f'25-Delta Skew: Front vs Back — {date_fmt}\n'
+                 f'(负值 = Put更贵, 正值 = Call更贵)',
+                 fontsize=13, fontweight='bold')
+
+    ax.legend(loc='lower right', fontsize=10, framealpha=0.8)
+    ax.grid(True, axis='x', alpha=0.2)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    print(f"  Saved combined skew chart: {save_path}")
+    plt.close()
 
 def run_analysis():
     """Run full analysis pipeline"""
@@ -131,6 +321,28 @@ def run_analysis():
         skew_ranking_main()
     except Exception as e:
         print(f"Error in skew ranking: {e}")
+
+    # 7. Generate combined charts (the two main output charts)
+    print("\n[7/7] Generating combined charts...")
+    trade_date = datetime.now().strftime('%Y%m%d')
+    os.makedirs('output/charts', exist_ok=True)
+
+    # Collect all smile DataFrames
+    all_smiles = {}
+    all_smiles.update(results.get('commodity_smiles', {}))
+    all_smiles.update(results.get('index_smiles', {}))
+
+    try:
+        plot_all_smiles(all_smiles, trade_date, 'output/charts/all_volatility_smiles.png')
+    except Exception as e:
+        print(f"  Error generating smile chart: {e}")
+        import traceback; traceback.print_exc()
+
+    try:
+        plot_skew_summary(results.get('skew_metrics', {}), trade_date, 'output/charts/all_skew_summary.png')
+    except Exception as e:
+        print(f"  Error generating skew chart: {e}")
+        import traceback; traceback.print_exc()
 
     print("\n" + "="*60)
     print("Analysis complete!")
