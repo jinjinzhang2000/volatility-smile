@@ -84,6 +84,10 @@ def calculate_skew_metrics(smile_df, underlying_price=None):
         if len(df_mat) < 5:
             continue
 
+        # Skip near-expiry options — too few liquid strikes for reliable fitting
+        if days < 20:
+            continue
+
         # Get underlying price
         if 'underlying' in df_mat.columns:
             S = df_mat['underlying'].iloc[0]
