@@ -84,6 +84,8 @@ def calculate_skew_metrics(smile_df, underlying_price=None):
         if len(df_mat) < 5:
             continue
 
+        days = df_mat['days'].iloc[0]
+
         # Skip near-expiry options — too few liquid strikes for reliable fitting
         if days < 20:
             continue
@@ -97,8 +99,6 @@ def calculate_skew_metrics(smile_df, underlying_price=None):
             S = underlying_price
         else:
             continue
-
-        days = df_mat['days'].iloc[0]
 
         # Find ATM IV (moneyness closest to 1.0)
         df_mat['dist_from_atm'] = abs(df_mat['moneyness'] - 1.0)
