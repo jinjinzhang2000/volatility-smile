@@ -1,13 +1,14 @@
 name: Volatility Smile Report
 
 on:
-  # Run on weekdays at 16:30 Beijing time (08:30 UTC) - after China market close
-  schedule:
-    - cron: '30 8 * * 1-5'
-    # Test schedule: 14:25 Beijing time (06:25 UTC)
-    - cron: '25 6 * * *'
+  # 定时排期已暂停（2026-08-20，按用户要求暂时停发）。
+  # 恢复时解注释下面的 schedule 块即可。注意 '25 6 * * *' 原是调试用的测试排期
+  # （每天都跑），一直没删，导致每天收两封；恢复时建议只保留 '30 8 * * 1-5'。
+  # schedule:
+  #   - cron: '30 8 * * 1-5'   # 16:30 北京时间，A股收盘后
+  #   - cron: '25 6 * * *'     # 测试排期，不建议恢复
 
-  # Allow manual trigger
+  # 手动触发仍然可用
   workflow_dispatch:
 
 jobs:
