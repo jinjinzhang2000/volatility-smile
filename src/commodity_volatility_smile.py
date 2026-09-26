@@ -12,7 +12,14 @@ import matplotlib.pyplot as plt
 import matplotlib
 import os
 import re
+import time
 from datetime import datetime
+
+from market_codes import (
+    czce_contract_month,
+    normalize_option_columns,
+    ref_year_from_dates,
+)
 
 # Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
 matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -69,60 +76,117 @@ def implied_volatility(option_price, F, K, T, r, option_type='call'):
         return np.nan
 
 
+_FUTURES_CACHE = {}
+_TUSHARE_PRO = None
+
+
+def _tushare_pro():
+    """Reuse one Tushare client. Token comes only from the environment."""
+    global _TUSHARE_PRO
+    if _TUSHARE_PRO is not None:
+        return _TUSHARE_PRO
+    token = os.environ.get("TUSHARE_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("TUSHARE_TOKEN is not set")
+    import tushare as ts
+    ts.set_token(token)
+    _TUSHARE_PRO = ts.pro_api(token)
+    return _TUSHARE_PRO
+
+
+def futures_ts_code(prefix, maturity):
+    """Tushare futures code for a commodity month (YYMM)."""
+    prefix = str(prefix).lower()
+    exchange_map = {
+        'rb': 'SHFE', 'ag': 'SHFE', 'au': 'SHFE', 'cu': 'SHFE', 'ru': 'SHFE',
+        'zn': 'SHFE', 'pb': 'SHFE', 'ni': 'SHFE', 'sn': 'SHFE', 'al': 'SHFE',
+        'ao': 'SHFE', 'fu': 'SHFE', 'bu': 'SHFE', 'sp': 'SHFE', 'br': 'SHFE',
+        'fg': 'CZCE', 'sr': 'CZCE', 'cf': 'CZCE', 'ta': 'CZCE', 'ma': 'CZCE',
+        'rm': 'CZCE', 'oi': 'CZCE', 'sa': 'CZCE', 'pf': 'CZCE', 'pk': 'CZCE',
+        'ur': 'CZCE', 'ap': 'CZCE', 'cj': 'CZCE', 'sf': 'CZCE', 'sm': 'CZCE',
+        'px': 'CZCE', 'sh': 'CZCE',
+        'i': 'DCE', 'jm': 'DCE', 'j': 'DCE', 'jd': 'DCE', 'm': 'DCE', 'y': 'DCE',
+        'a': 'DCE', 'b': 'DCE', 'p': 'DCE', 'c': 'DCE', 'v': 'DCE', 'l': 'DCE',
+        'pp': 'DCE', 'eg': 'DCE', 'eb': 'DCE', 'pg': 'DCE', 'lh': 'DCE',
+    }
+    exchange = exchange_map.get(prefix)
+    if exchange is None or not maturity or len(str(maturity)) < 4:
+        return None
+    maturity = str(maturity)
+    if exchange == 'CZCE':
+        # CZCE uses 3-digit month: FG605.ZCE
+        return f"{prefix.upper()}{maturity[1:]}.ZCE"
+    if exchange == 'DCE':
+        return f"{prefix.upper()}{maturity}.DCE"
+    return f"{prefix.upper()}{maturity}.SHF"
+
+
 def get_futures_price(prefix, maturity, trade_date):
     """
-    Get futures price for the underlying contract from Tushare
+    Get futures price for the underlying contract from Tushare.
 
-    Args:
-        prefix: Commodity code (e.g., 'rb', 'ag')
-        maturity: Contract month (e.g., '2605')
-        trade_date: Trade date string (YYYYMMDD)
-
-    Returns:
-        Futures close price or None
+    Returns the close price, or settlement if close is missing. None when the
+    contract cannot be resolved or the API has no row for that session.
     """
+    ts_code = futures_ts_code(prefix, maturity)
+    if ts_code is None:
+        return None
+
+    cache_key = (ts_code, str(trade_date))
+    if cache_key in _FUTURES_CACHE:
+        return _FUTURES_CACHE[cache_key]
+
     try:
-        import tushare as ts
-        # Use a consistent token fallback
-        token = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
-        ts.set_token(token)
-        pro = ts.pro_api()
-
-        # Map to Tushare exchange codes
-        exchange_map = {
-            'rb': 'SHFE', 'ag': 'SHFE', 'au': 'SHFE', 'cu': 'SHFE', 'ru': 'SHFE',
-            'fg': 'CZCE', 'sr': 'CZCE',
-            'i': 'DCE', 'jm': 'DCE'
-        }
-        exchange = exchange_map.get(prefix.lower(), 'SHFE')
-
-        # Format contract code based on exchange
-        if exchange == 'CZCE':
-            # CZCE uses 3-digit month: FG605.ZCE, SR605.ZCE
-            ts_code = f"{prefix.upper()}{maturity[1:]}.ZCE"
-        elif exchange == 'DCE':
-            # DCE uses 4-digit month: I2605.DCE, JM2605.DCE
-            ts_code = f"{prefix.upper()}{maturity}.DCE"
-        else:
-            # SHFE uses 4-digit month: RB2605.SHF
-            ts_code = f"{prefix.upper()}{maturity}.SHF"
-
-        df = pro.fut_daily(
-            ts_code=ts_code,
-            start_date=trade_date,
-            end_date=trade_date,
-            fields='close,settle'
-        )
-
-        if df is not None and not df.empty:
-            # Prefer close (last traded) price, fallback to settle
-            # Chinese exchange settle prices are theoretical and may not reflect market reality
-            price = df['close'].iloc[0] if pd.notna(df['close'].iloc[0]) else df['settle'].iloc[0]
-            return price
+        pro = _tushare_pro()
     except Exception as e:
         print(f"    Warning: Could not fetch futures price for {prefix}{maturity}: {e}")
+        _FUTURES_CACHE[cache_key] = None
+        return None
 
+    last_error = None
+    for attempt in range(3):
+        try:
+            df = pro.fut_daily(
+                ts_code=ts_code,
+                start_date=trade_date,
+                end_date=trade_date,
+                fields='close,settle'
+            )
+            if df is not None and not df.empty:
+                close = df['close'].iloc[0]
+                settle = df['settle'].iloc[0] if 'settle' in df.columns else None
+                price = close if pd.notna(close) else settle
+                if pd.notna(price):
+                    price = float(price)
+                    _FUTURES_CACHE[cache_key] = price
+                    return price
+            # An empty book is a real miss, not a transient error.
+            _FUTURES_CACHE[cache_key] = None
+            return None
+        except Exception as e:
+            last_error = e
+            time.sleep(0.4 * (attempt + 1))
+
+    if last_error is not None:
+        print(f"    Warning: Could not fetch futures price for {ts_code}: {last_error}")
+    _FUTURES_CACHE[cache_key] = None
     return None
+
+
+def list_option_files(data_dir, prefix):
+    """Monthly and yearly option CSVs for one product. Skips ``*_full`` dumps."""
+    files = []
+    prefix = prefix.lower()
+    for name in sorted(os.listdir(data_dir)):
+        lower = name.lower()
+        if not lower.endswith('.csv'):
+            continue
+        if not lower.startswith(f'{prefix}_option_'):
+            continue
+        if '_full' in lower:
+            continue
+        files.append(name)
+    return files
 
 
 def load_shfe_data(data_dir, prefix):
@@ -131,21 +195,19 @@ def load_shfe_data(data_dir, prefix):
     Used for: RB (螺纹钢), AG (白银), AU (黄金), CU (铜), etc.
     """
     all_data = []
-    for f in sorted(os.listdir(data_dir), reverse=True):
-        if f.startswith(f'{prefix}_option_') and f.endswith('.csv'):
-            # Use monthly files (e.g., rb_option_202512.csv) or full files
-            # Skip yearly aggregate files (e.g., rb_option_2025.csv)
-            if '_full.csv' in f or (len(f) == len(f'{prefix}_option_202512.csv')):
-                try:
-                    df = pd.read_csv(os.path.join(data_dir, f), encoding='utf-8-sig')
-                    all_data.append(df)
-                except:
-                    pass
+    for f in list_option_files(data_dir, prefix):
+        try:
+            df = pd.read_csv(os.path.join(data_dir, f), encoding='utf-8-sig')
+            all_data.append(df)
+        except Exception as e:
+            print(f"  Warning: Could not load {f}: {e}")
 
     if not all_data:
         return None
 
     df = pd.concat(all_data, ignore_index=True)
+    if '合约代码' in df.columns and 'trade_date' in df.columns:
+        df = df.drop_duplicates(subset=['合约代码', 'trade_date'], keep='last')
 
     # Parse contract code: rb2601C2650 -> maturity=2601, type=C, strike=2650
     def parse_code(code):
@@ -173,19 +235,19 @@ def load_dce_data(data_dir, prefix):
     Format: JM2604-C-1000.DCE or I2604-C-800.DCE
     """
     all_data = []
-    for f in sorted(os.listdir(data_dir), reverse=True):
-        if f.startswith(f'{prefix}_option_') and f.endswith('.csv'):
-            if '_full.csv' in f or (len(f) == len(f'{prefix}_option_202512.csv')):
-                try:
-                    df = pd.read_csv(os.path.join(data_dir, f), encoding='utf-8-sig')
-                    all_data.append(df)
-                except:
-                    pass
+    for f in list_option_files(data_dir, prefix):
+        try:
+            df = pd.read_csv(os.path.join(data_dir, f), encoding='utf-8-sig')
+            all_data.append(df)
+        except Exception as e:
+            print(f"  Warning: Could not load {f}: {e}")
 
     if not all_data:
         return None
 
     df = pd.concat(all_data, ignore_index=True)
+    if 'ts_code' in df.columns and 'trade_date' in df.columns:
+        df = df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
 
     # Parse ts_code: JM2604-C-1000.DCE or I2604-C-800.DCE
     def parse_code(code):
@@ -213,29 +275,31 @@ def load_czce_data(data_dir, prefix):
     Used for: FG (玻璃), SR (白糖), CF (棉花), etc.
     """
     all_data = []
-    for f in sorted(os.listdir(data_dir), reverse=True):
-        if f.startswith(f'{prefix}_option_') and f.endswith('.csv'):
-            if len(f) > 20 or '2026' in f:
-                try:
-                    df = pd.read_csv(os.path.join(data_dir, f))
-                    all_data.append(df)
-                except:
-                    pass
+    for f in list_option_files(data_dir, prefix):
+        try:
+            df = pd.read_csv(os.path.join(data_dir, f))
+            all_data.append(df)
+        except Exception as e:
+            print(f"  Warning: Could not load {f}: {e}")
 
     if not all_data:
         return None
 
     df = pd.concat(all_data, ignore_index=True)
+    if 'ts_code' in df.columns and 'trade_date' in df.columns:
+        df = df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
+    df = normalize_option_columns(df)
+    ref_year = ref_year_from_dates(df['trade_date'] if 'trade_date' in df.columns else None,
+                                   datetime.now().year)
 
-    # Parse ts_code: FG602C1000.ZCE -> maturity=2602, type=C, strike=1000
+    # Parse ts_code: FG611C1000.ZCE -> maturity=2611, type=C, strike=1000
+    # FG701 is July 2027 (2701), not 1701.
     def parse_code(code):
         pattern = rf'{prefix.upper()}(\d{{3}})([CP])(\d+)\.ZCE'
-        match = re.match(pattern, str(code))
+        match = re.match(pattern, str(code), re.IGNORECASE)
         if match:
-            mat = match.group(1)
-            # Convert 3-digit to 4-digit (602 -> 2602)
-            maturity = '2' + mat if mat[0] in '0123456' else '1' + mat
-            return maturity, match.group(2), int(match.group(3))
+            maturity = czce_contract_month(match.group(1), ref_year)
+            return maturity, match.group(2).upper(), int(match.group(3))
         return None, None, None
 
     parsed = df['ts_code'].apply(parse_code)
@@ -246,7 +310,17 @@ def load_czce_data(data_dir, prefix):
     return df
 
 
-def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, min_volume=50):
+def _product_code_from_frame(df_mat):
+    """Ticker from a contract id. Display names are not tickers."""
+    for column in ('合约代码', 'ts_code'):
+        if column in df_mat.columns and len(df_mat):
+            match = re.match(r'([a-zA-Z]+)', str(df_mat[column].iloc[0]))
+            if match:
+                return match.group(1).lower()
+    return None
+
+
+def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, min_volume=50, code=None):
     """
     Calculate volatility smile for a given date
 
@@ -260,12 +334,15 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
     Returns:
         DataFrame with volatility smile data
     """
-    df = df[df['trade_date'] == int(trade_date_str)].copy()
+    df = normalize_option_columns(df)
+    trade_date_str = str(trade_date_str)
+    df = df[df['trade_date'] == trade_date_str].copy()
 
-    # Filter by minimum volume to exclude illiquid options with stale prices
-    # Use higher threshold for better data quality
+    # Filter by minimum volume to exclude illiquid options with stale prices.
+    # A missing volume column is not the same as zero volume: CZCE files store
+    # size in ``vol``, and dropping those rows used to erase the whole smile.
     if 'volume' in df.columns:
-        df = df[df['volume'] >= min_volume]
+        df = df[df['volume'].fillna(0) >= min_volume]
 
     if df.empty:
         print(f"  No data for {trade_date_str}")
@@ -297,19 +374,13 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
 
         T = days / 365.0
 
-        # Get futures price directly from market data (preferred)
-        # This is more accurate than implied forward from options
-        code = name.lower() if len(name) <= 2 else None
-        # Try to extract code from the data
-        if code is None:
-            sample_code = df_mat['合约代码'].iloc[0] if '合约代码' in df_mat.columns else ''
-            code_match = re.match(r'([a-zA-Z]+)', str(sample_code))
-            if code_match:
-                code = code_match.group(1).lower()
+        # Futures lookup needs the ticker (ag), not the display name (白银).
+        # Short Chinese names used to be sent to Tushare as the contract prefix.
+        product_code = str(code).lower() if code else _product_code_from_frame(df_mat)
 
         F = None
-        if code:
-            F = get_futures_price(code, maturity, trade_date_str)
+        if product_code:
+            F = get_futures_price(product_code, maturity, trade_date_str)
             if F:
                 print(f"  {name} {maturity}: F={F:.0f} (futures), T={T:.3f} ({days}d)")
 
@@ -362,7 +433,7 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
                 if price is None or price <= 0:
                     continue
 
-                vol = row.get('volume', 0) if 'volume' in row else 0
+                vol = row['volume'] if 'volume' in row.index and pd.notna(row['volume']) else 0
                 if vol < min_volume:
                     continue
 
@@ -403,6 +474,7 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
 
             if primary_iv is not None:
                 results.append({
+                    'trade_date': trade_date_str,
                     'maturity': maturity,
                     'days': days,
                     'strike': K,
@@ -455,6 +527,9 @@ def calculate_volatility_smile(df, trade_date_str, name, risk_free_rate=0.025, m
                 continue
 
         cleaned_results.append(mat_df)
+
+    if not cleaned_results:
+        return None
 
     result_df = pd.concat(cleaned_results, ignore_index=True)
 
@@ -692,18 +767,23 @@ def process_commodity(code, trade_date=None):
 
     print(f"  Loaded {len(df)} options")
 
-    # Get trade date
-    dates = sorted(df['trade_date'].unique(), reverse=True)
+    # Get trade date. CSV loads may store the column as int or str.
+    dates = sorted({
+        str(d).replace('-', '').removesuffix('.0')
+        for d in df['trade_date'].dropna().unique()
+    }, reverse=True)
     if trade_date is None:
-        trade_date = str(dates[0])
-    elif int(trade_date) not in dates:
-        print(f"  Date {trade_date} not found, using {dates[0]}")
-        trade_date = str(dates[0])
+        trade_date = dates[0]
+    else:
+        trade_date = str(trade_date).replace('-', '').removesuffix('.0')
+        if trade_date not in dates:
+            print(f"  Date {trade_date} not found, using {dates[0]}")
+            trade_date = dates[0]
 
     print(f"  Using date: {trade_date}")
 
-    # Calculate smile
-    smile_df = calculate_volatility_smile(df, trade_date, config['name'])
+    # Calculate smile. Pass the ticker so futures lookup is not inferred from the Chinese name.
+    smile_df = calculate_volatility_smile(df, trade_date, config['name'], code=code)
 
     # Ensure output directories exist
     os.makedirs('output/charts', exist_ok=True)
