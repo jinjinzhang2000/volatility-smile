@@ -192,3 +192,37 @@ def test_etf_loader_reads_downloader_filenames(tmp_path):
     assert set(loaded['etf_type']) == {'50ETF', '500ETF'}
     assert (loaded['call_put'] == 'C').all()
     assert loaded['maturity'].iloc[0] == '2610'
+
+
+def test_etf_loader_reads_abbreviated_tushare_names(tmp_path):
+    """Live opt_basic names look like '50ETF购3月2750', not '期权2603认购'."""
+    rows = pd.DataFrame([
+        {
+            'ts_code': '10012435.SH',
+            'name': '50ETF购3月2750',
+            'call_put': 'C',
+            'exercise_price': 2.75,
+            'delist_date': '20270324',
+            'maturity_date': '20270324',
+            'trade_date': '20260924',
+            'close': 0.12,
+            'settle': 0.12,
+            'vol': 100,
+        },
+        {
+            'ts_code': '10012436.SH',
+            'name': '科创50沽3月1400',
+            'call_put': 'P',
+            'exercise_price': 1.4,
+            'delist_date': '20270324',
+            'trade_date': '20260924',
+            'close': 0.08,
+            'settle': 0.08,
+            'vol': 40,
+        },
+    ])
+    rows.to_csv(tmp_path / 'etf_510050_options_daily.csv', index=False)
+    loaded = index_smile.load_sse_etf_options(str(tmp_path))
+    assert list(loaded['etf_type']) == ['50ETF']
+    assert loaded['maturity'].iloc[0] == '2703'
+    assert loaded['exercise_price'].iloc[0] == 2.75

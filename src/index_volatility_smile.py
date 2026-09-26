@@ -94,6 +94,24 @@ def calculate_implied_forward(calls_df, puts_df, T, r):
     return merged['F_implied'].median()
 
 
+def _maturity_from_contract(row):
+    """YYMM from an embedded name code, else from maturity_date / delist_date."""
+    match = re.search(r'期权(\d{4})', str(row.get('name', '')))
+    if match:
+        return match.group(1)
+    for col in ('maturity_date', 'delist_date'):
+        value = row.get(col) if hasattr(row, 'get') else None
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if text.endswith('.0'):
+            text = text[:-2]
+        digits = re.sub(r'\D', '', text)
+        if len(digits) >= 6:
+            return digits[2:6]
+    return None
+
+
 def _strike_from_etf_name(name):
     """Last number in names like '华夏上证50ETF期权2603认购2.63'."""
     match = re.search(r'(\d+(?:\.\d+)?)\s*$', str(name))
@@ -143,14 +161,9 @@ def load_sse_etf_options(data_dir):
         if missing.any():
             df.loc[missing, 'exercise_price'] = df.loc[missing, 'name'].apply(_strike_from_etf_name)
 
-    # Parse maturity from name (e.g., "华夏上证50ETF期权2603认购2.63")
-    def parse_maturity(name):
-        match = re.search(r'期权(\d{4})', str(name))
-        if match:
-            return match.group(1)
-        return None
-
-    df['maturity'] = df['name'].apply(parse_maturity)
+    # Older files embed YYMM in the name ("期权2603"). Live opt_basic names are
+    # abbreviated ("50ETF购3月2750"), so fall back to the contract dates.
+    df['maturity'] = df.apply(_maturity_from_contract, axis=1)
 
     return df
 
