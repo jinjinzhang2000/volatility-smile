@@ -25,7 +25,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microso
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # Tushare token
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "").strip()
 
 # Universe: Liquid commodities by sector
 # Format: symbol -> (name, exchange, sector)

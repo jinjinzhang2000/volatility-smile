@@ -17,6 +17,8 @@ import os
 import re
 from datetime import datetime
 
+from market_codes import classify_etf, normalize_call_put, normalize_option_columns
+
 # Try to use WenQuanYi fonts for better support in Linux/GitHub Actions
 matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
@@ -92,6 +94,12 @@ def calculate_implied_forward(calls_df, puts_df, T, r):
     return merged['F_implied'].median()
 
 
+def _strike_from_etf_name(name):
+    """Last number in names like '华夏上证50ETF期权2603认购2.63'."""
+    match = re.search(r'(\d+(?:\.\d+)?)\s*$', str(name))
+    return float(match.group(1)) if match else None
+
+
 def load_sse_etf_options(data_dir):
     """
     Load SSE ETF options data
@@ -99,8 +107,11 @@ def load_sse_etf_options(data_dir):
     """
     all_data = []
     for f in sorted(os.listdir(data_dir), reverse=True):
-        # Support both old format (sse_etf_option_*) and new format (sse_etf_options_daily)
-        if (f.startswith('sse_etf_option') and f.endswith('.csv')):
+        lower = f.lower()
+        # Older extracts use sse_etf_option_*. The downloader writes etf_510050_options_daily.csv.
+        if not lower.endswith('.csv'):
+            continue
+        if lower.startswith('sse_etf_option') or lower.startswith('etf_'):
             try:
                 df = pd.read_csv(os.path.join(data_dir, f))
                 all_data.append(df)
@@ -111,19 +122,26 @@ def load_sse_etf_options(data_dir):
         return None
 
     df = pd.concat(all_data, ignore_index=True)
-
-    # Identify ETF type from name
-    def get_etf_type(name):
-        if '上证50ETF' in str(name) or '50ETF' in str(name):
-            return '50ETF'
-        elif '沪深300ETF' in str(name) or '300ETF' in str(name):
-            return '300ETF'
-        elif '中证500ETF' in str(name) or '500ETF' in str(name):
-            return '500ETF'
+    if 'name' not in df.columns:
+        print("  ETF files have no contract name; smile columns cannot be built")
         return None
 
-    df['etf_type'] = df['name'].apply(get_etf_type)
+    df['etf_type'] = df['name'].apply(classify_etf)
     df = df[df['etf_type'].notna()]
+    if 'call_put' in df.columns:
+        df['call_put'] = [
+            normalize_call_put(cp, name) or cp
+            for cp, name in zip(df['call_put'], df['name'])
+        ]
+    else:
+        df['call_put'] = df['name'].apply(lambda n: normalize_call_put('', n))
+
+    if 'exercise_price' not in df.columns:
+        df['exercise_price'] = df['name'].apply(_strike_from_etf_name)
+    else:
+        missing = df['exercise_price'].isna()
+        if missing.any():
+            df.loc[missing, 'exercise_price'] = df.loc[missing, 'name'].apply(_strike_from_etf_name)
 
     # Parse maturity from name (e.g., "华夏上证50ETF期权2603认购2.63")
     def parse_maturity(name):
@@ -186,7 +204,9 @@ def calculate_etf_volatility_smile(df, etf_type, trade_date_str, risk_free_rate=
     Returns:
         DataFrame with volatility smile data
     """
-    df = df[(df['etf_type'] == etf_type) & (df['trade_date'] == int(trade_date_str))].copy()
+    df = normalize_option_columns(df)
+    trade_date_str = str(trade_date_str)
+    df = df[(df['etf_type'] == etf_type) & (df['trade_date'] == trade_date_str)].copy()
 
     if df.empty:
         print(f"  No data for {etf_type} on {trade_date_str}")
@@ -271,6 +291,7 @@ def calculate_etf_volatility_smile(df, etf_type, trade_date_str, risk_free_rate=
                 moneyness = K / F
                 if 0.8 < moneyness < 1.2:
                     results.append({
+                        'trade_date': trade_date_str,
                         'maturity': maturity,
                         'days': days,
                         'strike': K,
@@ -300,7 +321,9 @@ def calculate_index_volatility_smile(df, name, trade_date_str, risk_free_rate=0.
     Returns:
         DataFrame with volatility smile data
     """
-    df = df[df['trade_date'] == int(trade_date_str)].copy()
+    df = normalize_option_columns(df)
+    trade_date_str = str(trade_date_str)
+    df = df[df['trade_date'] == trade_date_str].copy()
 
     if df.empty:
         print(f"  No data for {name} on {trade_date_str}")
@@ -381,6 +404,7 @@ def calculate_index_volatility_smile(df, name, trade_date_str, risk_free_rate=0.
                 moneyness = K / F
                 if 0.8 < moneyness < 1.2:
                     results.append({
+                        'trade_date': trade_date_str,
                         'maturity': maturity,
                         'days': days,
                         'strike': K,
@@ -576,13 +600,18 @@ def process_index_option(code, data_dir=None, trade_date=None):
         df_filtered = df
         print(f"  Loaded {len(df_filtered)} options")
 
-    # Get trade date
-    dates = sorted(df_filtered['trade_date'].unique(), reverse=True)
+    # Get trade date. CSV loads may store the column as int or str.
+    dates = sorted({
+        str(d).replace('-', '').removesuffix('.0')
+        for d in df_filtered['trade_date'].dropna().unique()
+    }, reverse=True)
     if trade_date is None:
-        trade_date = str(dates[0])
-    elif int(trade_date) not in dates:
-        print(f"  Date {trade_date} not found, using {dates[0]}")
-        trade_date = str(dates[0])
+        trade_date = dates[0]
+    else:
+        trade_date = str(trade_date).replace('-', '').removesuffix('.0')
+        if trade_date not in dates:
+            print(f"  Date {trade_date} not found, using {dates[0]}")
+            trade_date = dates[0]
 
     print(f"  Using date: {trade_date}")
 
