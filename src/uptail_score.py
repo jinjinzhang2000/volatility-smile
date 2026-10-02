@@ -220,7 +220,7 @@ def calculate_jump_risk(code, lookback_days=504):
     """
     try:
         import tushare as ts
-        token = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
+        token = os.environ.get("TUSHARE_TOKEN", "").strip()
         ts.set_token(token)
         pro = ts.pro_api()
 

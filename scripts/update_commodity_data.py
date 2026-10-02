@@ -7,16 +7,20 @@ Downloads latest data for volatility smile analysis
 import tushare as ts
 import pandas as pd
 import os
+import sys
 from datetime import datetime, timedelta
 import time
 
-# Tushare token - use environment variable for security
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "a70287c82208760b640d7f08525b97181166b817e0d9ff5f8f244bc2")
+# Tushare token - environment only. Do not keep a fallback in the repo.
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "").strip()
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "src"))
+from market_codes import classify_etf, filter_contracts, normalize_call_put  # noqa: E402
 
 # Data directories - support DATA_DIR env variable for shared data
 # Default to a local 'data' directory in the project root
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.dirname(SCRIPT_DIR)
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
 
 COMMODITY_DIR = os.path.join(DATA_DIR, "commodity")
@@ -29,9 +33,75 @@ TODAY = datetime.now().strftime("%Y%m%d")
 START_DATE = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
 
 
+_OPT_DAILY_CACHE = {}
+_OPT_BASIC_CACHE = {}
+
+
 def init_tushare():
+    if not TUSHARE_TOKEN:
+        raise RuntimeError("TUSHARE_TOKEN is not set")
     ts.set_token(TUSHARE_TOKEN)
-    return ts.pro_api()
+    return ts.pro_api(TUSHARE_TOKEN)
+
+
+def fetch_exchange_options(pro, exchange):
+    """Download one exchange's option book once per run."""
+    if exchange in _OPT_DAILY_CACHE:
+        return _OPT_DAILY_CACHE[exchange]
+
+    print(f"\nFetching {exchange} option daily ({START_DATE} to {TODAY})...")
+    df = pro.opt_daily(
+        exchange=exchange,
+        start_date=START_DATE,
+        end_date=TODAY,
+        fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
+    )
+    if df is None:
+        df = pd.DataFrame()
+    _OPT_DAILY_CACHE[exchange] = df
+    time.sleep(0.4)
+    return df
+
+
+def fetch_opt_basic(pro, exchange):
+    """Contract metadata (name, strike, call/put, delist) for one exchange."""
+    if exchange in _OPT_BASIC_CACHE:
+        return _OPT_BASIC_CACHE[exchange]
+
+    fields = 'ts_code,name,call_put,exercise_price,delist_date,maturity_date'
+    try:
+        basic = pro.opt_basic(exchange=exchange, fields=fields)
+    except Exception as e:
+        print(f"  opt_basic with fields failed ({e}); retrying without a field list")
+        basic = pro.opt_basic(exchange=exchange)
+    if basic is None:
+        basic = pd.DataFrame()
+    _OPT_BASIC_CACHE[exchange] = basic
+    time.sleep(0.3)
+    return basic
+
+
+def _append_new_rows(output_file, df_out, encoding=None):
+    """Append rows whose trade_date is not already in the file."""
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    write_kwargs = {'index': False}
+    if encoding:
+        write_kwargs['encoding'] = encoding
+    read_kwargs = {'encoding': encoding} if encoding else {}
+
+    if os.path.exists(output_file):
+        existing = pd.read_csv(output_file, **read_kwargs)
+        existing_dates = set(existing['trade_date'].astype(str).unique())
+        new_only = df_out[~df_out['trade_date'].astype(str).isin(existing_dates)]
+        if new_only.empty:
+            print(f"  No new data to add")
+            return
+        combined = pd.concat([existing, new_only], ignore_index=True)
+        combined.to_csv(output_file, **write_kwargs)
+        print(f"  Updated: {output_file} (+{len(new_only)} records)")
+    else:
+        df_out.to_csv(output_file, **write_kwargs)
+        print(f"  Created: {output_file}")
 
 
 def get_latest_trade_date(pro):
@@ -52,19 +122,14 @@ def download_shfe_options(pro, code, name):
     print(f"\n[{name}] Downloading {code.upper()} options...")
 
     try:
-        df = pro.opt_daily(
-            exchange='SHFE',
-            start_date=START_DATE,
-            end_date=TODAY,
-            fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
-        )
+        df = fetch_exchange_options(pro, 'SHFE')
 
         if df is None or df.empty:
             print(f"  No data returned from API")
             return None
 
-        # Filter by commodity code
-        df = df[df['ts_code'].str.upper().str.startswith(code.upper())]
+        # Digit anchor so a short code cannot swallow a longer one
+        df = filter_contracts(df, code)
 
         if df.empty:
             print(f"  No {code.upper()} options found")
@@ -74,7 +139,7 @@ def download_shfe_options(pro, code, name):
 
         # Convert to Chinese format to match existing data
         df_out = pd.DataFrame()
-        df_out['合约代码'] = df['ts_code'].str.replace('.SHFE', '', regex=False)
+        df_out['合约代码'] = df['ts_code'].str.replace(r'\.SHF(E)?$', '', regex=True)
         df_out['开盘价'] = df['open']
         df_out['最高价'] = df['high']
         df_out['最低价'] = df['low']
@@ -99,19 +164,7 @@ def download_shfe_options(pro, code, name):
         month = latest_date[:6]
         output_file = os.path.join(output_dir, f"{code.lower()}_option_{month}.csv")
 
-        if os.path.exists(output_file):
-            existing = pd.read_csv(output_file, encoding='utf-8-sig')
-            existing_dates = set(existing['trade_date'].astype(str).unique())
-            new_only = df_out[~df_out['trade_date'].astype(str).isin(existing_dates)]
-            if not new_only.empty:
-                combined = pd.concat([existing, new_only], ignore_index=True)
-                combined.to_csv(output_file, index=False, encoding='utf-8-sig')
-                print(f"  Updated: {output_file} (+{len(new_only)} records)")
-            else:
-                print(f"  No new data to add")
-        else:
-            df_out.to_csv(output_file, index=False, encoding='utf-8-sig')
-            print(f"  Created: {output_file}")
+        _append_new_rows(output_file, df_out, encoding='utf-8-sig')
 
         return df_out
 
@@ -125,19 +178,13 @@ def download_czce_options(pro, code, name):
     print(f"\n[{name}] Downloading {code.upper()} options...")
 
     try:
-        df = pro.opt_daily(
-            exchange='CZCE',
-            start_date=START_DATE,
-            end_date=TODAY,
-            fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
-        )
+        df = fetch_exchange_options(pro, 'CZCE')
 
         if df is None or df.empty:
             print(f"  No data returned from API")
             return None
 
-        # Filter by commodity code
-        df = df[df['ts_code'].str.upper().str.startswith(code.upper())]
+        df = filter_contracts(df, code)
 
         if df.empty:
             print(f"  No {code.upper()} options found")
@@ -149,21 +196,10 @@ def download_czce_options(pro, code, name):
         output_dir = os.path.join(COMMODITY_DIR, code.lower())
         os.makedirs(output_dir, exist_ok=True)
 
-        output_file = os.path.join(output_dir, f"{code.lower()}_option_2026.csv")
-
-        if os.path.exists(output_file):
-            existing = pd.read_csv(output_file)
-            existing_dates = set(existing['trade_date'].astype(str).unique())
-            new_only = df[~df['trade_date'].astype(str).isin(existing_dates)]
-            if not new_only.empty:
-                combined = pd.concat([existing, new_only], ignore_index=True)
-                combined.to_csv(output_file, index=False)
-                print(f"  Updated: {output_file} (+{len(new_only)} records)")
-            else:
-                print(f"  No new data to add")
-        else:
-            df.to_csv(output_file, index=False)
-            print(f"  Created: {output_file}")
+        latest_date = str(df['trade_date'].max())
+        month = latest_date[:6]
+        output_file = os.path.join(output_dir, f"{code.lower()}_option_{month}.csv")
+        _append_new_rows(output_file, df)
 
         return df
 
@@ -177,19 +213,14 @@ def download_dce_options(pro, code, name):
     print(f"\n[{name}] Downloading {code.upper()} options...")
 
     try:
-        df = pro.opt_daily(
-            exchange='DCE',
-            start_date=START_DATE,
-            end_date=TODAY,
-            fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
-        )
+        df = fetch_exchange_options(pro, 'DCE')
 
         if df is None or df.empty:
             print(f"  No data returned from API")
             return None
 
-        # Filter by commodity code
-        df = df[df['ts_code'].str.upper().str.startswith(code.upper())]
+        # ^I\\d keeps iron ore off other I* products; ^J\\d does not include JM
+        df = filter_contracts(df, code)
 
         if df.empty:
             print(f"  No {code.upper()} options found")
@@ -205,19 +236,7 @@ def download_dce_options(pro, code, name):
         month = latest_date[:6]
         output_file = os.path.join(output_dir, f"{code.lower()}_option_{month}.csv")
 
-        if os.path.exists(output_file):
-            existing = pd.read_csv(output_file)
-            existing_dates = set(existing['trade_date'].astype(str).unique())
-            new_only = df[~df['trade_date'].astype(str).isin(existing_dates)]
-            if not new_only.empty:
-                combined = pd.concat([existing, new_only], ignore_index=True)
-                combined.to_csv(output_file, index=False)
-                print(f"  Updated: {output_file} (+{len(new_only)} records)")
-            else:
-                print(f"  No new data to add")
-        else:
-            df.to_csv(output_file, index=False)
-            print(f"  Created: {output_file}")
+        _append_new_rows(output_file, df)
 
         return df
 
@@ -231,19 +250,13 @@ def download_index_options(pro, code, name):
     print(f"\n[{name}] Downloading {code.upper()} options...")
 
     try:
-        df = pro.opt_daily(
-            exchange='CFFEX',
-            start_date=START_DATE,
-            end_date=TODAY,
-            fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
-        )
+        df = fetch_exchange_options(pro, 'CFFEX')
 
         if df is None or df.empty:
             print(f"  No data returned from API")
             return None
 
-        # Filter by index code
-        df = df[df['ts_code'].str.upper().str.startswith(code.upper())]
+        df = filter_contracts(df, code)
 
         if df.empty:
             print(f"  No {code.upper()} options found")
@@ -255,19 +268,7 @@ def download_index_options(pro, code, name):
         os.makedirs(INDEX_OPTIONS_DIR, exist_ok=True)
         output_file = os.path.join(INDEX_OPTIONS_DIR, f"{code.lower()}_options_daily.csv")
 
-        if os.path.exists(output_file):
-            existing = pd.read_csv(output_file)
-            existing_dates = set(existing['trade_date'].astype(str).unique())
-            new_only = df[~df['trade_date'].astype(str).isin(existing_dates)]
-            if not new_only.empty:
-                combined = pd.concat([existing, new_only], ignore_index=True)
-                combined.to_csv(output_file, index=False)
-                print(f"  Updated: {output_file} (+{len(new_only)} records)")
-            else:
-                print(f"  No new data to add")
-        else:
-            df.to_csv(output_file, index=False)
-            print(f"  Created: {output_file}")
+        _append_new_rows(output_file, df)
 
         return df
 
@@ -276,61 +277,64 @@ def download_index_options(pro, code, name):
         return None
 
 
+def _attach_etf_contract_fields(daily, basic, target_name):
+    """Join opt_basic onto daily rows so the smile loader can read strikes."""
+    if basic is None or basic.empty or 'name' not in basic.columns:
+        return daily.iloc[0:0].copy()
+
+    meta = basic.copy()
+    meta['etf_type'] = meta['name'].apply(classify_etf)
+    meta = meta[meta['etf_type'] == target_name]
+    if meta.empty:
+        return daily.iloc[0:0].copy()
+
+    keep = [c for c in ('ts_code', 'name', 'call_put', 'exercise_price', 'delist_date', 'maturity_date')
+            if c in meta.columns]
+    meta = meta[keep].drop_duplicates('ts_code')
+    merged = daily[daily['ts_code'].isin(set(meta['ts_code']))].merge(meta, on='ts_code', how='left')
+    if merged.empty:
+        return merged
+
+    names = merged['name'] if 'name' in merged.columns else ''
+    if 'call_put' in merged.columns:
+        merged['call_put'] = [
+            normalize_call_put(cp, name)
+            for cp, name in zip(merged['call_put'], names)
+        ]
+    else:
+        merged['call_put'] = [normalize_call_put('', name) for name in names]
+
+    if 'delist_date' not in merged.columns and 'maturity_date' in merged.columns:
+        merged['delist_date'] = merged['maturity_date']
+    return merged
+
+
 def download_etf_options(pro, etf_code, name, exchange):
     """Download ETF options"""
     print(f"\n[{name}] Downloading ETF options...")
 
     try:
-        # Get mapping of options to underlying ETF
-        basic = pro.opt_basic(exchange=exchange)
+        basic = fetch_opt_basic(pro, exchange)
         if basic is None or basic.empty:
             print(f"  Could not fetch basic options info for {exchange}")
             return None
 
-        # Filter those that belong to our target ETF using the name (e.g. '50ETF')
-        # This is more robust for SSE where underlying_index field might be missing in some API versions
-        target_options = basic[basic['name'].str.contains(name, na=False)]['ts_code'].tolist()
-        if not target_options:
-            print(f"  No option contracts found for {name} ({etf_code})")
-            return None
-
-        df = pro.opt_daily(
-            exchange=exchange,
-            start_date=START_DATE,
-            end_date=TODAY,
-            fields='ts_code,trade_date,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi'
-        )
-
-        if df is None or df.empty:
+        daily = fetch_exchange_options(pro, exchange)
+        if daily is None or daily.empty:
             print(f"  No daily data returned from API for {exchange}")
             return None
 
-        # Filter by our target option contracts
-        df = df[df['ts_code'].isin(target_options)]
-
+        # classify_etf keeps 科创50 out of 50ETF and checks 500ETF before 50ETF.
+        df = _attach_etf_contract_fields(daily, basic, name)
         if df.empty:
             print(f"  No {name} ({etf_code}) options data found for the date range")
             return None
 
         print(f"  Downloaded {len(df)} records")
 
-        # Save to index options directory
         os.makedirs(INDEX_OPTIONS_DIR, exist_ok=True)
         output_file = os.path.join(INDEX_OPTIONS_DIR, f"etf_{etf_code}_options_daily.csv")
-
-        if os.path.exists(output_file):
-            existing = pd.read_csv(output_file)
-            existing_dates = set(existing['trade_date'].astype(str).unique())
-            new_only = df[~df['trade_date'].astype(str).isin(existing_dates)]
-            if not new_only.empty:
-                combined = pd.concat([existing, new_only], ignore_index=True)
-                combined.to_csv(output_file, index=False)
-                print(f"  Updated: {output_file} (+{len(new_only)} records)")
-            else:
-                print(f"  No new data to add")
-        else:
-            df.to_csv(output_file, index=False)
-            print(f"  Created: {output_file}")
+        _append_new_rows(output_file, df)
 
         return df
 
@@ -361,7 +365,6 @@ def main():
 
     for code, name in shfe_commodities:
         download_shfe_options(pro, code, name)
-        time.sleep(0.5)
 
     # Download CZCE commodities (郑州商品交易所)
     czce_commodities = [
@@ -371,7 +374,6 @@ def main():
 
     for code, name in czce_commodities:
         download_czce_options(pro, code, name)
-        time.sleep(0.5)
 
     # Download DCE commodities (大连商品交易所)
     dce_commodities = [
@@ -381,7 +383,6 @@ def main():
 
     for code, name in dce_commodities:
         download_dce_options(pro, code, name)
-        time.sleep(0.5)
 
     # Download index options (CFFEX)
     index_options = [
@@ -392,7 +393,6 @@ def main():
 
     for code, name in index_options:
         download_index_options(pro, code, name)
-        time.sleep(0.5)
 
     # Download ETF options
     etf_options = [
@@ -403,7 +403,6 @@ def main():
 
     for etf_code, name, exchange in etf_options:
         download_etf_options(pro, etf_code, name, exchange)
-        time.sleep(0.5)
 
     print("\n" + "=" * 60)
     print("Update complete!")

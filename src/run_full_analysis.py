@@ -24,6 +24,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
 os.chdir(BASE_DIR)
 
+from market_codes import dominant_trade_date
+
 # Display names
 NAMES = {
     'rb': '螺纹钢 RB', 'fg': '玻璃 FG', 'ag': '白银 AG', 'au': '黄金 AU',
@@ -220,7 +222,7 @@ def run_analysis():
     }
 
     # 1. Generate commodity volatility smiles
-    print("\n[1/4] Generating commodity volatility smiles...")
+    print("\n[1/7] Generating commodity volatility smiles...")
     try:
         from commodity_volatility_smile import process_commodity, COMMODITIES
         for code in COMMODITIES.keys():
@@ -230,7 +232,7 @@ def run_analysis():
         print(f"Error in commodity smile: {e}")
 
     # 2. Generate index volatility smiles
-    print("\n[2/4] Generating index volatility smiles...")
+    print("\n[2/7] Generating index volatility smiles...")
     try:
         from index_volatility_smile import process_all_index_options
         index_results = process_all_index_options()
@@ -239,7 +241,7 @@ def run_analysis():
         print(f"Error in index smile: {e}")
 
     # 3. Calculate skew metrics and update history
-    print("\n[3/4] Calculating skew metrics...")
+    print("\n[3/7] Calculating skew metrics...")
     try:
         from skew_analyzer import (
             calculate_skew_metrics, update_skew_history,
@@ -248,13 +250,14 @@ def run_analysis():
         )
 
         all_alerts = []
+        session_date = _session_trade_date(results)
 
         # Process commodities
         for code, smile_df in results['commodity_smiles'].items():
             if smile_df is not None and not smile_df.empty:
                 skew_metrics = calculate_skew_metrics(smile_df)
                 if skew_metrics:
-                    trade_date = datetime.now().strftime('%Y%m%d')
+                    trade_date = _frame_trade_date(smile_df, session_date)
                     results['skew_metrics'][code] = skew_metrics
                     update_skew_history(code, trade_date, skew_metrics)
                     print_skew_report(code, skew_metrics, trade_date)
@@ -263,14 +266,12 @@ def run_analysis():
                     alerts = generate_alerts(code, skew_metrics, trade_date)
                     all_alerts.extend(alerts)
 
-
-
         # Process indices
         for code, smile_df in results['index_smiles'].items():
             if smile_df is not None and not smile_df.empty:
                 skew_metrics = calculate_skew_metrics(smile_df)
                 if skew_metrics:
-                    trade_date = datetime.now().strftime('%Y%m%d')
+                    trade_date = _frame_trade_date(smile_df, session_date)
                     results['skew_metrics'][code] = skew_metrics
                     update_skew_history(code, trade_date, skew_metrics)
                     print_skew_report(code, skew_metrics, trade_date)
@@ -294,7 +295,7 @@ def run_analysis():
         traceback.print_exc()
 
     # 4. Generate group analysis
-    print("\n[4/6] Generating group analysis...")
+    print("\n[4/7] Generating group analysis...")
     try:
         from skew_analyzer import analyze_group_skew
         for group_name in ['real_estate', 'precious_metals', 'industrial']:
@@ -303,7 +304,7 @@ def run_analysis():
         print(f"Error in group analysis: {e}")
 
     # 5. Generate ATM IV ranking
-    print("\n[5/6] Generating ATM IV ranking...")
+    print("\n[5/7] Generating ATM IV ranking...")
     try:
         from atm_iv_ranking import main as atm_iv_main
         atm_iv_main()
@@ -311,7 +312,7 @@ def run_analysis():
         print(f"Error in ATM IV ranking: {e}")
 
     # 6. Generate 25d skew ranking
-    print("\n[6/6] Generating 25-delta skew ranking...")
+    print("\n[6/7] Generating 25-delta skew ranking...")
     try:
         from skew_ranking import main as skew_ranking_main
         skew_ranking_main()
@@ -320,7 +321,7 @@ def run_analysis():
 
     # 7. Generate combined charts (the two main output charts)
     print("\n[7/7] Generating combined charts...")
-    trade_date = datetime.now().strftime('%Y%m%d')
+    trade_date = _session_trade_date(results)
 
     # Clear old charts so only the 2 combined charts remain
     charts_dir = 'output/charts'
@@ -354,9 +355,37 @@ def run_analysis():
     return results
 
 
-def generate_html_report(results):
+def _frame_trade_date(smile_df, fallback):
+    """Trade date stored on a smile frame, else the session fallback."""
+    if smile_df is not None and 'trade_date' in smile_df.columns and not smile_df.empty:
+        value = str(smile_df['trade_date'].iloc[0]).replace('-', '')
+        if len(value) >= 8 and value[:8].isdigit():
+            return value[:8]
+    return fallback
+
+
+def _session_trade_date(results):
+    """Date of the market data, not the clock date the job happened to run."""
+    frames = []
+    frames.extend(results.get('commodity_smiles', {}).values())
+    frames.extend(results.get('index_smiles', {}).values())
+    return dominant_trade_date(frames, datetime.now().strftime('%Y%m%d'))
+
+
+def generate_html_report(results, trade_date=None):
     """Generate HTML report with all analysis"""
-    today = datetime.now().strftime("%Y-%m-%d")
+    if trade_date and len(str(trade_date)) >= 8 and str(trade_date)[:8].isdigit():
+        raw = str(trade_date)[:8]
+        today = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    else:
+        today = datetime.now().strftime("%Y-%m-%d")
+
+    analyzed = []
+    for bucket in ('commodity_smiles', 'index_smiles'):
+        for code, smile_df in results.get(bucket, {}).items():
+            if smile_df is not None and not getattr(smile_df, 'empty', True):
+                analyzed.append(NAMES.get(code, code.upper()))
+    analyzed_html = "".join(f"<li>{name}</li>" for name in analyzed) or "<li>No products produced a smile this run.</li>"
 
     alerts_html = ""
     if results.get('alerts'):
@@ -428,8 +457,7 @@ def generate_html_report(results):
 
         <h2>Products Analyzed</h2>
         <ul>
-            <li><strong>Commodity Options:</strong> RB (螺纹钢), FG (玻璃), AG (白银), AU (黄金), CU (铜)</li>
-            <li><strong>Index Options:</strong> 50ETF, 300ETF, 500ETF, IO (沪深300), MO (中证1000), HO (上证50)</li>
+            {analyzed_html}
         </ul>
 
         <p>Volatility smile and skew history charts are attached.</p>
@@ -449,7 +477,7 @@ if __name__ == '__main__':
     results = run_analysis()
 
     # Generate HTML report
-    html_report = generate_html_report(results)
+    html_report = generate_html_report(results, _session_trade_date(results))
 
     # Save report
     os.makedirs('output', exist_ok=True)
